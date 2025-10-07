@@ -1,0 +1,8 @@
+pydantic
+pytest
+pytest-cov
+requests
+python-dotenv
+PyGithub
+groq
+pydantic-ai
