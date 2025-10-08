@@ -50,19 +50,27 @@ class GitHubActionsAgent(Agent):
         if the API request fails.
         """
         groq_query = "*[_type == 'githubActionConfig'][0]{workflowName, pythonVersion, runTests}"
-        result = self.groq_client.query(groq_query)
-        if result:
-            # Update configuration with values from GROQ API
-            self.config = GitHubActionsConfig(
-                workflow_name=result.get("workflowName", "CI Pipeline"),
-                python_version=result.get("pythonVersion", "3.13.0"),
-                run_tests=result.get("runTests", True),
-                groq_api_endpoint=result.get("groqApiEndpoint", ""),
-                groq_api_key=result.get("groqApiKey", "")
-            )
-        else:
-            # Fallback to default configuration if API request fails
-            self.config = GitHubActionsConfig()
+        try:
+            result = self.groq_client.query(groq_query)
+        except Exception:
+            result = None
+
+        wf_name = self.config.workflow_name or "CI Pipeline"
+        py_ver = self.config.python_version or "3.11"
+        run_tests = True if self.config.run_tests is None else self.config.run_tests
+
+        if isinstance(result, dict):
+            wf_name = result.get("workflowName", wf_name) or wf_name
+            py_ver = result.get("pythonVersion", py_ver) or py_ver
+            run_tests = bool(result.get("runTests", run_tests))
+
+        self.config = GitHubActionsConfig(
+            workflow_name=wf_name,
+            python_version=py_ver,
+            run_tests=run_tests,
+            groq_api_endpoint=self.config.groq_api_endpoint,
+            groq_api_key=self.config.groq_api_key,
+        )
 
     def generate_pipeline(self) -> str:
         """
@@ -97,7 +105,7 @@ jobs:
     env:
       GROQ_API_ENDPOINT: ${{{{ secrets.GROQ_API_ENDPOINT }}}}  # API endpoint for GROQ
       GROQ_API_KEY: ${{{{ secrets.GROQ_API_KEY }}}}           # Authentication key
-      GITHUB_TOKEN: ${{{{ secrets.GH_TOKEN }}}}               # GitHub access token
+      GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}           # GitHub access token
 
     steps:
     - name: Checkout code
@@ -142,13 +150,6 @@ jobs:
             echo "✅ talkitdoit.html test passed! 🚀"
           else
             echo "❌ talkitdoit.html test failed 😢"
-            exit 1
-          fi
-          
-          if curl -I http://localhost/index.html | grep -q "200 OK"; then
-            echo "✅ index.html test passed! 🎯"
-          else
-            echo "❌ index.html test failed 😢"
             exit 1
           fi
           

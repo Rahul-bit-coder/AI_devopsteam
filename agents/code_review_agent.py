@@ -2,8 +2,15 @@ from pydantic import BaseModel
 from pydantic_ai import Agent  # Replace with actual import if different
 from utils.groq_client import GROQClient
 from models.groq_models import CodeReviewRequest, CodeReviewFeedback
-from github import Github
 import os
+import requests
+from typing import Optional, Any
+
+# Lazy/optional import for GitHub client to avoid hard dependency during local reviews
+try:
+    from github import Github as _Github
+except Exception:  # Module not present or shadowed by wrong package
+    _Github = None
 
 class CodeReviewConfig(BaseModel):
     """
@@ -45,7 +52,13 @@ class CodeReviewAgent(Agent):
             api_endpoint=config.groq_api_endpoint,
             api_key=config.groq_api_key
         )
-        self.github_client = Github(self.config.github_token)
+        # Initialize GitHub client only if library is available and token provided
+        self.github_client = None
+        if _Github is not None and self.config.github_token:
+            try:
+                self.github_client = _Github(self.config.github_token)
+            except Exception:
+                self.github_client = None
 
     def fetch_pull_request_files(self):
         """
@@ -54,6 +67,8 @@ class CodeReviewAgent(Agent):
         Returns:
             PaginatedList: List of files modified in the pull request
         """
+        if not self.github_client:
+            raise RuntimeError("GitHub client unavailable. Install PyGithub and set GH_TOKEN, repo_name, pull_request_number.")
         repo = self.github_client.get_repo(self.config.repo_name)
         pull_request = repo.get_pull(self.config.pull_request_number)
         files = pull_request.get_files()
@@ -75,17 +90,25 @@ class CodeReviewAgent(Agent):
         files = self.fetch_pull_request_files()
         feedback = []
 
+        include_exts = ('.py', '.js', '.ts', '.tsx', '.jsx', '.html', '.css')
         for file in files:
-            if file.filename.endswith('.py'):  # Focus on Python files
-                file_content = file.patch  # Get the diff
-                # Create review request for the file
+            if file.filename.endswith(include_exts):
+                # Fetch actual file content via raw_url
+                file_content_text = ""
+                try:
+                    if hasattr(file, 'raw_url') and file.raw_url:
+                        r = requests.get(file.raw_url, timeout=15)
+                        r.raise_for_status()
+                        file_content_text = r.text
+                except Exception:
+                    file_content_text = ""
+
                 code_review_request = CodeReviewRequest(
                     file_name=file.filename,
-                    file_content=file.raw_url,  # You might need to fetch the actual content
-                    diff=file.patch
+                    file_content=file_content_text,
+                    diff=getattr(file, 'patch', '') or ''
                 )
                 try:
-                    # Send the review request to GROQ API
                     review_feedback = self.groq_client.send_code_review_request(
                         model_id=self.config.model,
                         code_review_request=code_review_request
@@ -112,6 +135,8 @@ class CodeReviewAgent(Agent):
             feedback (list): List of feedback dictionaries for each reviewed file
                            containing issues, suggestions, and quality scores
         """
+        if not self.github_client:
+            raise RuntimeError("GitHub client unavailable. Install PyGithub and set GH_TOKEN, repo_name, pull_request_number.")
         repo = self.github_client.get_repo(self.config.repo_name)
         pull_request = repo.get_pull(self.config.pull_request_number)
 
@@ -149,3 +174,33 @@ class CodeReviewAgent(Agent):
         feedback = self.perform_code_review()
         self.post_feedback_to_github(feedback)
         return feedback
+
+    def review_local_file(self, file_path: str):
+        """
+        Review a local file (any text file, e.g., HTML) without using GitHub.
+        Returns a structured feedback dict from the GROQ API.
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            return {"file": file_path, "error": f"Failed to read file: {str(e)}"}
+
+        request = CodeReviewRequest(
+            file_name=os.path.basename(file_path),
+            file_content=content,
+            diff=""  # No diff context for local review
+        )
+        try:
+            feedback: CodeReviewFeedback = self.groq_client.send_code_review_request(
+                model_id=self.config.model,
+                code_review_request=request
+            )
+            return {
+                "file": file_path,
+                "issues": feedback.issues,
+                "suggestions": feedback.suggestions,
+                "overall_quality": feedback.overall_quality
+            }
+        except Exception as e:
+            return {"file": file_path, "error": str(e)}

@@ -60,21 +60,31 @@ class DockerfileAgent(Agent):
         """
         # Query GROQ API for Docker configuration
         groq_query = "*[_type == 'dockerConfig'][0]{baseImage, exposePort, copySource, workDir}"
-        result = self.groq_client.query(groq_query)
-        
-        if result:
-            # Update configuration with values from GROQ API
-            self.config = DockerfileConfig(
-                base_image=result.get("baseImage", "nginx:alpine"),
-                expose_port=result.get("exposePort", 80),
-                copy_source=result.get("copySource", "./html"),
-                work_dir=result.get("workDir", "/usr/share/nginx/html"),
-                groq_api_endpoint=result.get("groqApiEndpoint", ""),
-                groq_api_key=result.get("groqApiKey", "")
-            )
-        else:
-            # Fallback to default configuration if API request fails
-            self.config = DockerfileConfig()
+        try:
+            result = self.groq_client.query(groq_query)
+        except Exception:
+            result = None
+
+        # Always enforce safe defaults; only override provided keys
+        base = {
+            "baseImage": self.config.base_image or "nginx:alpine",
+            "exposePort": self.config.expose_port or 80,
+            "copySource": self.config.copy_source or "./html",
+            "workDir": self.config.work_dir or "/usr/share/nginx/html",
+            "groqApiEndpoint": self.config.groq_api_endpoint,
+            "groqApiKey": self.config.groq_api_key,
+        }
+        if isinstance(result, dict):
+            base.update({k: v for k, v in result.items() if v not in (None, "")})
+
+        self.config = DockerfileConfig(
+            base_image=base.get("baseImage", "nginx:alpine"),
+            expose_port=int(base.get("exposePort", 80)),
+            copy_source=base.get("copySource", "./html"),
+            work_dir=base.get("workDir", "/usr/share/nginx/html"),
+            groq_api_endpoint=base.get("groqApiEndpoint", self.config.groq_api_endpoint),
+            groq_api_key=base.get("groqApiKey", self.config.groq_api_key),
+        )
 
     def generate_dockerfile(self) -> str:
         """
@@ -95,4 +105,5 @@ EXPOSE {self.config.expose_port}
 
 CMD ["nginx", "-g", "daemon off;"]
 """
-        return dockerfile
+        # Ensure FROM is on the first line (no leading newline)
+        return dockerfile.lstrip()
